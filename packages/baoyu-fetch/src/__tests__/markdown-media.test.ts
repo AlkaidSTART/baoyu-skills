@@ -63,6 +63,36 @@ Poster: https://cdn.example.com/poster.png
     expect(rewritten).toContain("Poster: imgs/img-003-poster.png");
   });
 
+  test("rewrites overlapping prefix URLs without corrupting longer URLs", () => {
+    const markdown = [
+      "![base](https://cdn.example.com/photo.png)",
+      "![sized](https://cdn.example.com/photo.png?w=800)",
+      "Plain: https://cdn.example.com/photo.png?w=800&fmt=webp",
+      '![captioned](https://cdn.example.com/photo.png "Hero image")',
+    ].join("\n\n");
+
+    const rewritten = rewriteMarkdownMediaLinks(markdown, [
+      {
+        url: "https://cdn.example.com/photo.png",
+        localPath: "imgs/img-001-photo.png",
+        absolutePath: "/tmp/imgs/img-001-photo.png",
+        kind: "image",
+      },
+      {
+        url: "https://cdn.example.com/photo.png?w=800",
+        localPath: "imgs/img-002-photo.png",
+        absolutePath: "/tmp/imgs/img-002-photo.png",
+        kind: "image",
+      },
+    ]);
+
+    expect(rewritten).toContain("![base](imgs/img-001-photo.png)");
+    expect(rewritten).toContain("![sized](imgs/img-002-photo.png)");
+    expect(rewritten).toContain("Plain: https://cdn.example.com/photo.png?w=800&fmt=webp");
+    expect(rewritten).toContain('![captioned](imgs/img-001-photo.png "Hero image")');
+    expect(rewritten).not.toContain("imgs/img-001-photo.png?w=800");
+  });
+
   test("normalizes and dedupes linked Substack CDN image variants", () => {
     const resizedUrl =
       "https://substackcdn.com/image/fetch/$s_!wORh!,w_1456,c_limit,f_auto,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fb83f9d2f-711f-4edd-bc8a-303b8de422e5_1600x1300.png";
