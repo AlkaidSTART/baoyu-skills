@@ -42,45 +42,98 @@ export function getImageExtension(urlOrPath: string): string {
   return match ? match[1]!.toLowerCase() : "png";
 }
 
-export async function downloadFile(url: string, destPath: string): Promise<void> {
-  return await new Promise((resolve, reject) => {
-    const protocol = url.startsWith("https://") ? https : http;
-    const file = fs.createWriteStream(destPath);
+const MAX_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-    const request = protocol.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        const redirectUrl = response.headers.location;
-        if (redirectUrl) {
-          file.close();
-          fs.unlinkSync(destPath);
-          void downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+export async function downloadFile(url: string, destPath: string, redirectCount = 0): Promise<void> {
+  return await new Promise((resolve, reject) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      reject(new Error(`Invalid download URL: ${url}`));
+      return;
+    }
+
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      reject(new Error(`Unsupported download protocol: ${parsed.protocol}`));
+      return;
+    }
+
+    const protocol = parsed.protocol === "https:" ? https : http;
+    let settled = false;
+    let file: fs.WriteStream | null = null;
+
+    const cleanupFile = (): void => {
+      if (file) {
+        file.destroy();
+        file = null;
+      }
+      fs.unlink(destPath, () => {});
+    };
+
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanupFile();
+      reject(error);
+    };
+
+    const request = protocol.get(parsed, { headers: { "User-Agent": "Mozilla/5.0" } }, (response) => {
+      const status = response.statusCode ?? 0;
+
+      if (REDIRECT_STATUSES.has(status)) {
+        const location = response.headers.location;
+        response.resume();
+        if (!location) {
+          fail(new Error(`Redirect (${status}) missing Location header`));
           return;
         }
-      }
-
-      if (response.statusCode !== 200) {
-        file.close();
-        fs.unlinkSync(destPath);
-        reject(new Error(`Failed to download: ${response.statusCode}`));
+        if (redirectCount >= MAX_REDIRECTS) {
+          fail(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
+          return;
+        }
+        let nextUrl: string;
+        try {
+          nextUrl = new URL(location, parsed).href;
+        } catch {
+          fail(new Error(`Invalid redirect URL: ${location}`));
+          return;
+        }
+        settled = true;
+        void downloadFile(nextUrl, destPath, redirectCount + 1).then(resolve).catch(reject);
         return;
       }
 
+      if (status !== 200) {
+        response.resume();
+        fail(new Error(`Failed to download: ${status}`));
+        return;
+      }
+
+      file = fs.createWriteStream(destPath);
+      file.on("error", (error) => fail(error));
+      response.on("error", (error) => fail(error));
       response.pipe(file);
       file.on("finish", () => {
-        file.close();
-        resolve();
+        if (settled) return;
+        file?.close((closeErr) => {
+          if (settled) return;
+          if (closeErr) {
+            fail(closeErr);
+            return;
+          }
+          settled = true;
+          resolve();
+        });
       });
     });
 
-    request.on("error", (error) => {
-      file.close();
-      fs.unlink(destPath, () => {});
-      reject(error);
-    });
+    request.on("error", (error) => fail(error));
 
     request.setTimeout(30_000, () => {
       request.destroy();
-      reject(new Error("Download timeout"));
+      fail(new Error("Download timeout"));
     });
   });
 }
