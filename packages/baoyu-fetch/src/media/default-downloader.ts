@@ -15,6 +15,81 @@ import type { MediaAsset, MediaDownloadRequest, MediaDownloadResult, MediaKind }
 
 const DOWNLOAD_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+const MAX_REDIRECTS = 5;
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function assertHttpsUrl(rawUrl: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid media URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Only HTTPS media downloads are allowed: ${rawUrl}`);
+  }
+  return parsed;
+}
+
+function stripCrossOriginAuthHeaders(headers: Record<string, string>): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === "authorization" || lower === "cookie") {
+      continue;
+    }
+    next[key] = value;
+  }
+  return next;
+}
+
+async function fetchHttpsMedia(
+  initialUrl: string,
+  extraHeaders?: Record<string, string>,
+): Promise<{ response: Response; finalUrl: string }> {
+  let current = assertHttpsUrl(initialUrl);
+  let headers: Record<string, string> = {
+    "user-agent": DOWNLOAD_USER_AGENT,
+    ...(extraHeaders ?? {}),
+  };
+  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`Media download timed out after ${DOWNLOAD_TIMEOUT_MS}ms`);
+    }
+
+    const response = await fetch(current.href, {
+      method: "GET",
+      redirect: "manual",
+      headers,
+      signal: AbortSignal.timeout(remainingMs),
+    });
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => {});
+      if (!location) {
+        throw new Error(`Redirect (${response.status}) missing Location header`);
+      }
+      if (redirects >= MAX_REDIRECTS) {
+        throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+      }
+      const nextUrl = assertHttpsUrl(new URL(location, current).href);
+      if (nextUrl.origin !== current.origin) {
+        headers = stripCrossOriginAuthHeaders(headers);
+      }
+      current = nextUrl;
+      continue;
+    }
+
+    return { response, finalUrl: response.url || current.href };
+  }
+
+  throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+}
 
 function parseBase64DataUri(rawUrl: string): { contentType: string; bytes: Buffer } | null {
   const match = rawUrl.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/i);
@@ -94,27 +169,28 @@ export async function downloadMediaAssets(
         kind = resolveMediaKind(sourceUrl, contentType, extension, asset.kind);
         bytes = parsed.bytes;
       } else {
-        const response = await fetch(sourceUrl, {
-          method: "GET",
-          redirect: "follow",
-          headers: {
-            "user-agent": DOWNLOAD_USER_AGENT,
-            ...(asset.headers ?? {}),
-          },
-        });
+        const { response, finalUrl } = await fetchHttpsMedia(sourceUrl, asset.headers);
 
         if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
           request.log.warn(`Skipping media (${response.status}): ${asset.url}`);
           continue;
         }
 
-        sourceUrl = normalizeMediaUrl(response.url || sourceUrl);
+        sourceUrl = normalizeMediaUrl(finalUrl);
         contentType = normalizeContentType(response.headers.get("content-type"));
         extension =
           resolveExtensionFromUrl(sourceUrl) ??
           resolveExtensionFromUrl(asset.url) ??
           resolveExtensionFromUrl(asset.fileNameHint ?? "");
         kind = resolveMediaKind(sourceUrl, contentType, extension, asset.kind);
+        if (!kind) {
+          await response.body?.cancel().catch(() => {});
+          request.log.warn(
+            `Skipping media with unsupported content-type (${contentType || "unknown"}): ${asset.url}`,
+          );
+          continue;
+        }
         bytes = Buffer.from(await response.arrayBuffer());
       }
 

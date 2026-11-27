@@ -109,13 +109,13 @@ export function resolveMediaKind(
     return kindFromType;
   }
 
+  if (contentType && contentType !== "application/octet-stream") {
+    return undefined;
+  }
+
   const kindFromExtension = resolveKindFromExtension(extension);
   if (kindFromExtension) {
     return kindFromExtension;
-  }
-
-  if (contentType && contentType !== "application/octet-stream") {
-    return undefined;
   }
 
   if (hint) {
