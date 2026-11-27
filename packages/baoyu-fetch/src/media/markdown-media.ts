@@ -13,7 +13,7 @@ import {
 import type { MediaAsset, MediaReplacement } from "./types";
 
 const MARKDOWN_LINK_RE =
-  /(!?\[[^\]\n]*\])\((<)?((?:https?:\/\/[^)\s>]+)|(?:data:[^)>\s]+))(>)?\)/g;
+  /(!?\[[^\]\n]*\])\((<)?((?:https?:\/\/[^)\s>]+)|(?:data:[^)>\s]+))(>)?(\s+(?:"[^"\n]*"|'[^'\n]*'))?\)/g;
 const FRONTMATTER_COVER_RE = /^(coverImage:\s*")((?:https?:\/\/[^"]+)|(?:data:[^"]+))(")/m;
 const RAW_URL_RE = /(?:https?:\/\/[^\s<>"')\]]+|data:[^\s<>"')\]]+)/g;
 
@@ -254,12 +254,12 @@ function normalizeLinkedImageMarkdown(markdown: string): string {
 
 export function normalizeMarkdownMediaLinks(markdown: string): string {
   MARKDOWN_LINK_RE.lastIndex = 0;
-  let result = markdown.replace(MARKDOWN_LINK_RE, (full, label, openAngle, rawUrl, closeAngle) => {
+  let result = markdown.replace(MARKDOWN_LINK_RE, (full, label, openAngle, rawUrl, closeAngle, title) => {
     const normalizedUrl = normalizeMediaUrl(rawUrl);
     if (normalizedUrl === rawUrl) {
       return full;
     }
-    return `${label}(${openAngle ?? ""}${normalizedUrl}${closeAngle ?? ""})`;
+    return `${label}(${openAngle ?? ""}${normalizedUrl}${closeAngle ?? ""}${title ?? ""})`;
   });
 
   result = result.replace(FRONTMATTER_COVER_RE, (full, prefix, rawUrl, suffix) => {
@@ -421,12 +421,12 @@ export function rewriteMarkdownMediaLinks(
   }
 
   MARKDOWN_LINK_RE.lastIndex = 0;
-  let result = markdown.replace(MARKDOWN_LINK_RE, (full, label, _openAngle, rawUrl) => {
+  let result = markdown.replace(MARKDOWN_LINK_RE, (full, label, _openAngle, rawUrl, _closeAngle, title) => {
     const replacement = replacementMap.get(rawUrl) ?? replacementMap.get(normalizeMediaUrl(rawUrl));
     if (!replacement) {
       return full;
     }
-    return `${label}(${replacement})`;
+    return `${label}(${formatMarkdownDestination(replacement)}${title ?? ""})`;
   });
 
   result = result.replace(FRONTMATTER_COVER_RE, (full, prefix, rawUrl, suffix) => {
@@ -437,13 +437,10 @@ export function rewriteMarkdownMediaLinks(
     return `${prefix}${replacement}${suffix}`;
   });
 
-  for (const { url, localPath } of replacements) {
-    result = result.split(url).join(localPath);
-    const normalizedUrl = normalizeMediaUrl(url);
-    if (normalizedUrl !== url) {
-      result = result.split(normalizedUrl).join(localPath);
-    }
-  }
+  RAW_URL_RE.lastIndex = 0;
+  result = result.replace(RAW_URL_RE, (rawUrl) => {
+    return replacementMap.get(rawUrl) ?? replacementMap.get(normalizeMediaUrl(rawUrl)) ?? rawUrl;
+  });
 
   return result;
 }
