@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { connectChrome, type ChromeConnection } from "../browser/chrome-launcher";
 import { CdpClient } from "../browser/cdp-client";
@@ -101,12 +101,12 @@ export function shouldAutoContinueForceWait(
   return false;
 }
 
-async function writeOutput(path: string, content: string): Promise<void> {
-  const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-  if (directory) {
+async function writeOutput(outputPath: string, content: string): Promise<void> {
+  const directory = dirname(outputPath);
+  if (directory && directory !== ".") {
     await mkdir(directory, { recursive: true });
   }
-  await writeFile(path, content, "utf8");
+  await writeFile(outputPath, content, "utf8");
 }
 
 async function writeDebugArtifacts(
@@ -146,21 +146,33 @@ async function openRuntime(
     logger,
   });
 
-  const cdp = await CdpClient.connect(chrome.browserWsUrl);
-  const browser = await BrowserSession.open(cdp, { interactive });
-  if (interactive) {
-    await browser.bringToFront().catch(() => {});
-  }
-  const network = new NetworkJournal(browser.targetSession, logger);
-  await network.start();
+  let cdp: CdpClient | null = null;
+  let browser: BrowserSession | null = null;
+  let network: NetworkJournal | null = null;
 
-  return {
-    chrome,
-    cdp,
-    browser,
-    network,
-    interactive,
-  };
+  try {
+    cdp = await CdpClient.connect(chrome.browserWsUrl);
+    browser = await BrowserSession.open(cdp, { interactive });
+    if (interactive) {
+      await browser.bringToFront().catch(() => {});
+    }
+    network = new NetworkJournal(browser.targetSession, logger);
+    await network.start();
+
+    return {
+      chrome,
+      cdp,
+      browser,
+      network,
+      interactive,
+    };
+  } catch (error) {
+    network?.stop();
+    await browser?.close().catch(() => {});
+    await cdp?.close().catch(() => {});
+    await chrome.close().catch(() => {});
+    throw error;
+  }
 }
 
 async function closeRuntime(runtime: RuntimeResources | null | undefined): Promise<void> {

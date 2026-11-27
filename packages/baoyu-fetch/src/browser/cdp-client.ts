@@ -77,6 +77,26 @@ export class CdpClient {
     this.ws.on("message", (raw) => {
       this.handleMessage(raw.toString());
     });
+    this.ws.on("close", (code, reason) => {
+      const detail = reason.toString().trim();
+      const suffix = detail ? ` (${code}: ${detail})` : ` (code ${code})`;
+      this.rejectAllPending(new Error(`CDP WebSocket closed${suffix}`));
+    });
+    this.ws.on("error", (error) => {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.rejectAllPending(new Error(`CDP WebSocket error: ${err.message}`));
+    });
+  }
+
+  private rejectAllPending(error: Error): void {
+    if (this.pending.size === 0) {
+      return;
+    }
+    const entries = Array.from(this.pending.values());
+    this.pending.clear();
+    for (const pending of entries) {
+      pending.reject(new Error(`${pending.method}: ${error.message}`));
+    }
   }
 
   static async connect(browserWsUrl: string): Promise<CdpClient> {
@@ -90,7 +110,7 @@ export class CdpClient {
   }
 
   private handleMessage(rawMessage: string): void {
-    const message = JSON.parse(rawMessage) as {
+    let message: {
       id?: number;
       sessionId?: string;
       method?: string;
@@ -98,6 +118,11 @@ export class CdpClient {
       result?: unknown;
       error?: CdpErrorShape;
     };
+    try {
+      message = JSON.parse(rawMessage);
+    } catch {
+      return;
+    }
 
     if (typeof message.id === "number") {
       const pending = this.pending.get(message.id);
@@ -126,21 +151,29 @@ export class CdpClient {
     params: JsonObject = {},
     sessionId?: string,
   ): Promise<T> {
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`${method}: CDP WebSocket is not open`);
+    }
+
     const id = this.nextId;
     this.nextId += 1;
 
     const payload = sessionId ? { id, method, params, sessionId } : { id, method, params };
 
-    const result = new Promise<T>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
         method,
       });
-    });
 
-    this.ws.send(JSON.stringify(payload));
-    return result;
+      try {
+        this.ws.send(JSON.stringify(payload));
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error);
+      }
+    });
   }
 
   async sendBrowserCommand<T>(method: string, params: JsonObject = {}): Promise<T> {
